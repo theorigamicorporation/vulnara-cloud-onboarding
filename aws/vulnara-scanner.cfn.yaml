@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Read-only access for Vulnara cloud scanning. Creates an IAM role that only
+  Vulnara's OIDC issuer can assume, for one Vulnara connection, with read
+  access to configuration metadata and an explicit deny on secrets and data.
+
+Parameters:
+  IssuerUrl:
+    Type: String
+    Default: "{{VULNARA_ISSUER}}"
+    AllowedPattern: "^(https://[^/]+(/.*)?|\\{\\{VULNARA_ISSUER\\}\\})$"
+    Description: Vulnara's OIDC issuer URL, as shown in Vulnara.
+  Subject:
+    Type: String
+    Default: "{{VULNARA_SUBJECT}}"
+    AllowedPattern: "^(vulnara:conn:[0-9a-f-]{36}|\\{\\{VULNARA_SUBJECT\\}\\})$"
+    Description: The subject shown in Vulnara, vulnara:conn:<connection id>.
+  CreateOidcProvider:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: >-
+      Set to false when this account already has an IAM OIDC provider for the
+      issuer URL (for example from an earlier connection). An account can hold
+      only one provider per URL.
+  RoleName:
+    Type: String
+    Default: VulnaraScanner
+    Description: Name of the IAM role to create.
+
+Conditions:
+  ShouldCreateOidcProvider: !Equals [!Ref CreateOidcProvider, "true"]
+
+Resources:
+  VulnaraOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOidcProvider
+    Properties:
+      Url: !Ref IssuerUrl
+      ClientIdList:
+        - sts.amazonaws.com
+
+  VulnaraScannerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: Read-only role assumed by Vulnara for cloud posture scanning.
+      MaxSessionDuration: 3600
+      # A JSON string, because the condition keys are named after the issuer
+      # host and YAML keys cannot be built from a parameter.
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Federated": "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/${IssuerHost}"
+                },
+                "Action": "sts:AssumeRoleWithWebIdentity",
+                "Condition": {
+                  "StringEquals": {
+                    "${IssuerHost}:sub": "${Subject}",
+                    "${IssuerHost}:aud": "sts.amazonaws.com"
+                  }
+                }
+              }
+            ]
+          }
+        - IssuerHost: !Select [1, !Split ["https://", !Ref IssuerUrl]]
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/SecurityAudit"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/job-function/ViewOnlyAccess"
+      Tags:
+        - Key: managed-by
+          Value: vulnara-cloud-onboarding
+        # Orders the role after the provider when the stack creates it;
+        # DependsOn cannot name a resource whose condition may be false.
+        - Key: vulnara-oidc-provider
+          Value: !If [ShouldCreateOidcProvider, !Ref VulnaraOidcProvider, existing]
+
+  VulnaraDenySecretsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: VulnaraDenySecretsAndData
+      Roles:
+        - !Ref VulnaraScannerRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenySecretsAndDataReads
+            Effect: Deny
+            Action:
+              - secretsmanager:GetSecretValue
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:GetParametersByPath
+              - ssm:GetParameterHistory
+              - kms:Decrypt
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:GetObjectAttributes
+              - s3:GetObjectTorrent
+              - dynamodb:GetItem
+              - dynamodb:BatchGetItem
+              - dynamodb:Query
+              - dynamodb:Scan
+              - lambda:GetFunction
+              - lambda:GetFunctionConfiguration
+              - ec2:GetPasswordData
+              - ec2:DescribeInstanceAttribute
+              - ec2:GetLaunchTemplateData
+              - ec2:GetConsoleOutput
+              - ec2:GetConsoleScreenshot
+              - cloudformation:GetTemplate
+              - codebuild:BatchGetProjects
+              - batch:DescribeJobDefinitions
+              - ecs:DescribeTaskDefinition
+              - datapipeline:GetPipelineDefinition
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+              - lambda:GetLayerVersion
+              - ssm:GetDocument
+              - logs:GetLogEvents
+              - logs:FilterLogEvents
+              - logs:StartQuery
+              - logs:GetQueryResults
+              - codecommit:GetFile
+              - codecommit:GetBlob
+              - codecommit:GetFolder
+              - codecommit:GetDifferences
+              - sagemaker:DescribeNotebookInstanceLifecycleConfig
+            Resource: "*"
+          - Sid: DenyApiGatewayKeyValues
+            Effect: Deny
+            Action: apigateway:GET
+            Resource:
+              - !Sub "arn:${AWS::Partition}:apigateway:*::/apikeys"
+              - !Sub "arn:${AWS::Partition}:apigateway:*::/apikeys/*"
+
+Outputs:
+  RoleArn:
+    Description: Paste this role ARN into Vulnara.
+    Value: !GetAtt VulnaraScannerRole.Arn
