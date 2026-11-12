@@ -28,3 +28,7 @@ Start in Vulnara: add a cloud account there first. Vulnara shows the subject and
 pass to these templates, then asks for the values they print.
 
 Read the files before you run them. They are short on purpose.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
